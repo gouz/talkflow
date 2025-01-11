@@ -30,26 +30,37 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: false
-          generate_release_notes: false
+          generate_release_notes: true
 
   build_release:
     name: Build Release
     needs: create_release
     environment: build
+    outputs:
+      output_linux_amd: ${{ steps.release_package.outputs.output_LINUX_AMD_SHA }}
+      output_linux_arm: ${{ steps.release_package.outputs.output_LINUX_ARM_SHA }}
+      output_mac_amd: ${{ steps.release_package.outputs.output_MAC_AMD_SHA }}
+      output_mac_arm: ${{ steps.release_package.outputs.output_MAC_ARM_SHA }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15]
         include:
           - os: ubuntu-latest
-            release_suffix: ubuntu
+            release_suffix: ubuntu-amd
             compile_options: --target=bun-linux-x64-modern
+            sha_field: LINUX_AMD_SHA
+          - os: ubuntu-latest
+            release_suffix: ubuntu-arm
+            compile_options: --target=bun-linux-arm64
+            sha_field: LINUX_ARM_SHA
           - os: macos-latest
             release_suffix: mac
             compile_options: --target=bun-darwin-arm64
+            sha_field: MAC_ARM_SHA
           - os: macos-15
             release_suffix: mac_intel
             platform: x64
             compile_options: --target=bun-darwin-x64
+            sha_field: MAC_AMD_SHA
     runs-on: ${{ matrix.os }}
     steps:
       - uses: oven-sh/setup-bun@v1
@@ -57,54 +68,35 @@ jobs:
         uses: actions/checkout@v4
       - run: bun install
       - run: bun make:exe ${{ matrix.compile_options }}
-      - name: Compress action step
-        uses: a7ul/tar-action@v1.2.0
-        id: compress
-        with:
-          command: c
-          files: |
-            ./exe
-          outPath: slidesk.tar.gz
       - name: Rename release package
-        run: cat ./slidesk.tar.gz > release_${{ matrix.release_suffix }}.tar.gz
-      - name: Release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
-        with:
-          tag_name: ${{ needs.create_release.outputs.tag-name }}
-          files: release_${{ matrix.release_suffix }}.tar.gz
-
-  generate_packages:
-    name: Build packages file
-    needs: create_release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: oven-sh/setup-bun@v1
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - run: bun install
-      - run: bun make:exe
-      - name: create sample script
+        id: release_package
         run: |
-          mkdir -p .debpkg/usr/bin
-          cp -p exe/* .debpkg/usr/bin/
-      - name: build-deb-action
-        uses: jiro4989/build-deb-action@v3
-        with:
-          package: "slidesk"
-          desc: "Your presentation companion"
-          arch: "amd64"
-          package_root: ".debpkg"
-          maintainer: "Sylvain Gougouzian <sylvain@gougouzian.fr>"
-          version: ${{ github.ref_name }}
+          cat ./exe/slidesk > slidesk_${{ matrix.release_suffix }}
+          sha=($(shasum -a 256 ./exe/slidesk))
+          sha_value="${{ matrix.sha_field }}"
+          echo "output_${sha_value}=${{ matrix.sha_field }}-$sha" >> "$GITHUB_OUTPUT"
       - name: Release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
           tag_name: ${{ needs.create_release.outputs.tag-name }}
-          files: slidesk_${{ github.ref_name }}_amd64.deb
+          files: slidesk_${{ matrix.release_suffix }}
+      
+  update_brew_formula:
+    name: Update formula
+    runs-on: ubuntu-latest
+    needs: build_release
+    steps:
+      - name: Update formula
+        uses: yodamad-actions/brew-formula-update@0.2
+        with:
+          file: slidesk.rb
+          owner: gouz
+          repo: homebrew-tools
+          version: ${{ github.ref_name }}
+          fields: ${{ toJSON(needs.build_release.outputs) }}
+          token: ${{ secrets.BREW_TOKEN }}
 
   push_docker_hub:
     name: Push on Docker Hub
